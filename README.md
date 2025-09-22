@@ -1,182 +1,69 @@
-# PRD：Two-Player Five-Card Draw（Multi-Agent，LLM 决策版）
-1. 目标与范围
-
-模拟两名玩家进行 Five-card draw 一局或多局对战。
-
-Agent1：基线随机策略（仅在换牌阶段做随机弃换 0–3 张）。
-
-Agent2：通过 OpenAI API 的大模型做出“换哪些牌”的决策（无下注环节）。
-
-输出每局对战日志与多局统计（胜率、平均换牌数、牌型分布）。
-
-不做：下注/筹码系统、多人博弈、联机/GUI、策略可插拔框架等较为复杂的需求，先实现简单的系统
-
-2. 用户故事
-
-研究/教学：比较“随机 vs LLM”在 Five-card draw 的长期胜率差异与牌型提升能力。
-
-工程：通过清晰的 JSON 决策契约，稳定复现 LLM 的换牌动作并可批量模拟。
-
-3. 核心玩法规则（简化版，无下注）
-
-发牌：标准 52 张牌，洗牌后每人发 5 张。
-
-换牌阶段：玩家可弃 0–5 张并等量补牌（一次性完成）。
-
-摊牌：按牌型比大小：
-高牌 < 一对 < 两对 < 三条 < 顺子 < 同花 < 葫芦 < 四条 < 同花顺。
-顺子 A 可作高（10-J-Q-K-A）或低（A-2-3-4-5）。
-
-胜负：比较牌型；如同牌型则按主值/踢脚（kicker）逐级比较；完全相同则平局。
-
-4. 系统组成
-
-deck.py：牌堆/洗牌/发牌。
-
-hand_eval.py：五张牌型评估与比较器（返回 (rank_id, tiebreak_tuple)）。
-
-agent_random.py：Agent1 随机策略。
-
-agent_llm.py：Agent2（OpenAI API 调用 + JSON 决策解析）。
-
-engine.py：回合管理（发牌→两名玩家依次决策→补牌→摊牌→记账）。
-
-runner.py：CLI 批量模拟与统计输出（CSV/JSON 日志）。
-
-logger.py：结构化日志（每局手牌、换牌选择、最终牌型/胜负）。
-
-5. Agent2（OpenAI API）决策契约
-5.1 决策输入（Engine → LLM）
-
-可见信息：自己的 5 张手牌（带花色与点数）、换牌规则约束（0–5 张）、禁止“未揭示信息”（看不到牌堆/对手手牌）。
-
-目标：最大化最终牌型强度。
-
-输出格式：严格 JSON，仅给出要弃掉的索引数组（基于当前 5 张手牌的 0-based 索引），以及可选的“理由”。
-
-示例输入（user 内容）：
-
-{
-  "hand": ["AS","KH","KD","7C","2D"],
-  "rules": {"max_discards": 5},
-  "task": "Return indices of cards to discard (0-4)."
-}
-
-5.2 决策输出（LLM → Engine）
-{
-  "discard_indices": [0, 3, 4],
-  "rationale": "Keep the KK pair; replace A,7,2 to improve to two-pair/trips/full house."
-}
-
-5.3 模型与参数（建议）
-
-模型：gpt-4.1-mini 或更高性价比支持 JSON 输出的模型（你可以替换为你账户中可用的、支持 response_format 的最新模型）。
-
-temperature: 0（稳定可复现）。
-
-response_format: {"type":"json_schema","json_schema":{...}}（强约束输出，避免解析失败）。
-
-重试：网络/速率限制/解析错误时 2–3 次指数退避重试。
-
-超时：2–5s / 调用；解析失败则本局回退为“保守策略”（例如保留已成对的牌，其他全换，最多 3 张）。
-
-成本提示：一次对局仅 1 次 LLM 调用（Agent2 的换牌决策），批量 100 局成本可控但需缓存/去重（见 §9）。
-
-5.4 提示词模板（建议）
-
-system
-
-You are a poker assistant playing Five-card draw. 
-Rules: one draw round; you may discard 0-5 cards once; unknown cards are uniformly random.
-Goal: maximize final 5-card hand strength.
-Output strictly in the required JSON schema. No extra text.
-
-
-user（见 5.1 示例）
-
-json schema（关键片段）
-
-{
-  "name": "DiscardDecision",
-  "schema": {
-    "type": "object",
-    "properties": {
-      "discard_indices": {
-        "type": "array",
-        "items": {"type": "integer", "minimum": 0, "maximum": 4},
-        "minItems": 0,
-        "maxItems": 5
-      },
-      "rationale": {"type": "string"}
-    },
-    "required": ["discard_indices"],
-    "additionalProperties": false
-  }
-}
-
-6. 评估与日志
-
-逐局日志（CSV/JSON）：
-game_id, p1_hand_before, p1_discards, p1_hand_after, p1_rank, p2_hand_before, p2_discards, p2_hand_after, p2_rank, winner
-
-聚合指标：
-
-胜率/和局率；
-
-平均弃牌数；
-
-牌型分布（起手 vs 摊牌）；
-
-牌型提升率（起手→摊牌 Rank 改善的比例，按玩家统计）。
-
-健全性检查：
-
-LLM 输出可解析且索引合法；
-
-不允许重复/越界弃牌；
-
-随机数种子记录（重现实验）。
-
-7. 边界与规则细节
-
-顺子低 A：A-2-3-4-5（花色任意）；
-
-同花顺判定先同花后顺子；
-
-平局判定：按牌型主次关键值逐层比较（例：对子比对点数，再比三张/两对的高对、低对，再比踢脚）；完全相同判平。
-
-8. CLI 与配置
-
-命令：python runner.py --games 100 --seed 42 --log out.jsonl --model gpt-4.1-mini --rate-limit 60
-
-环境变量：OPENAI_API_KEY
-
-配置文件（YAML/JSON）：模型名、温度、并发、重试、超时、是否开启等价手缓存（见 §9）。
-
-9. 性能与成本控制
-
-等价手缓存：将“等价手牌 canonical 表示（按点数归一、花色型归一） + 决策规则/模型名”作为 key，缓存 LLM 的 discard_indices。大量随机对局中会频繁命中等价模式，可显著降低 API 次数。
-
-批处理：可将多局请求串行化并控并发，遵守速率限制（如 60 RPM）。
-
-短输出：仅 JSON、禁用赘述，减少 token。
-
-降级路径：解析失败或超时，落到“简单规则”决定弃牌，保证流水线不中断。
-
-10. 验收标准（DoD）
-
- 单局可运行并打印双方起手、弃换与最终牌型，胜负正确。
-
- 100 局模拟在单机可完成，日志完整、无解析异常中断。
-
- 评估统计输出胜率、牌型分布与提升率；LLM 决策 JSON 合法率 ≥ 99.5%。
-
- 顺子、同花、葫芦、同花顺等边界牌型及平局比较通过单元测试（≥ 50 个用例）。
-
- 缓存命中率报告与成本估算（调用次数/局）。
-
-11. 风险与对策
-
-LLM 偶发输出不合规 → 使用 response_format: json_schema + 严格解析 + 重试 + 降级策略。
-
-随机性导致波动 → 固定 RNG 种子
+# Multi-Agent Five-Card Draw
+
+欢迎来到 **Multi-Agent Five-Card Draw** 项目！该仓库提供了一个可复现的两人五张抽牌扑克模拟环境，支持基线随机策略与调用大语言模型（LLM）的智能体。你可以快速运行多局对战，观察不同策略的胜率、弃牌习惯以及最终牌型分布。
+
+如果你对项目的完整需求、边界条件和实现规划感兴趣，请查看详细的产品需求文档：[PRD.md](./PRD.md)。
+
+## 功能亮点
+- 🎴 **真实的五张抽牌规则**：标准 52 张牌、一次性弃换、涵盖顺子/同花/葫芦等所有牌型判定与比较。
+- 🤖 **多智能体对战**：内置随机策略代理和可调用 OpenAI API 的 LLM 代理，方便扩展自定义策略。
+- 📊 **结构化日志与统计**：自动输出每局对战日志，并汇总胜率、弃牌次数、牌型分布等指标。
+- 🧪 **完备的单元测试**：针对手牌评估的核心逻辑提供了覆盖边界情况的测试，保证比较结果可靠。
+
+## 快速开始
+### 1. 克隆项目
+```bash
+git clone https://github.com/your-org/multi-agent-poker-games.git
+cd multi-agent-poker-games
+```
+
+### 2. 安装依赖
+项目使用 Python 3.10+。推荐在虚拟环境中安装依赖：
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows 使用 .venv\Scripts\activate
+pip install -r requirements.txt
+```
+> 如果仓库尚未提供 `requirements.txt`，请根据自身环境安装 `openai`、`pydantic`、`typer` 等依赖，或使用 `pip install -e .` 安装自定义包。
+
+### 3. 配置 OpenAI（可选）
+若需启用 LLM 代理，请准备可用的 OpenAI API Key 并设置环境变量：
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+## 运行模拟
+使用命令行工具 `runner.py` 启动多局对战模拟：
+```bash
+python runner.py --games 100 --seed 42 --max-discards 5 --log out.jsonl
+```
+
+常用参数说明：
+- `--games`：模拟的对局数。
+- `--seed`：随机数种子，方便复现实验。
+- `--max-discards`：允许弃牌的最大张数（默认 5）。
+- `--model`：LLM 代理调用的模型名称（如 `gpt-4.1-mini`）。
+- `--log`：保存结构化对局日志的文件路径。支持 JSON Lines 或 CSV。
+
+当启用 LLM 代理时，系统会按 PRD 中约定的 JSON 契约与模型交互，并在解析失败时自动回退到保守策略。
+
+## 查看输出
+- **命令行摘要**：每局对战的胜负情况、最终手牌和局部统计会实时打印。
+- **日志文件**：包含完整的起手、弃牌、补牌和摊牌信息，可用于分析模型行为。
+- **聚合统计**：程序会汇总胜率、平均弃牌数、牌型分布等指标，帮助评估策略表现。
+
+## 运行测试
+运行单元测试验证牌型评估逻辑：
+```bash
+pytest
+```
+
+## 扩展方向
+- 新增自定义策略：实现 `agent_random.py` 中的接口即可接入。
+- 替换日志管道：`logger.py` 支持结构化输出，可接入数据库或可视化工具。
+- 批量实验：结合缓存、速率限制与 PRD 中的优化建议，构建大规模对战分析。
+
+## 反馈与贡献
+欢迎通过 Issue 或 Pull Request 分享你的改进意见或实验结果！如果你正在为课程、研究或项目做扩展，也欢迎在 PRD 中对需求进行补充。
+
+祝你模拟愉快 🎲
