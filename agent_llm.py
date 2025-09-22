@@ -165,6 +165,7 @@ class LLMAgent:
         self._client_checked = client is not None
         self._cache = DecisionCache(cache_path)
         self._metrics = LLMAgentMetrics()
+        self._quota_error_shown = False  # 标记是否已显示配额错误提示
 
     @staticmethod
     def create_default_client() -> Any:
@@ -178,6 +179,15 @@ class LLMAgent:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             return None
+        
+        # 检查代理设置
+        http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+        https_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        
+        if http_proxy or https_proxy:
+            print(f"🌐 检测到代理设置: HTTP={http_proxy}, HTTPS={https_proxy}")
+        
+        # 简单的客户端创建，让OpenAI库自动处理代理
         return module.OpenAI(api_key=api_key)
 
     def metrics(self) -> Dict[str, float]:
@@ -233,40 +243,47 @@ class LLMAgent:
         for attempt in range(1, self.max_retries + 1):
             try:
                 self._metrics.api_calls += 1
-                response = client.responses.create(  # type: ignore[attr-defined]
+                response = client.chat.completions.create(  # type: ignore[attr-defined]
                     model=self.model,
                     temperature=self.temperature,
                     response_format=JSON_SCHEMA,
                     messages=messages,
                     timeout=self.timeout,
                 )
-                content = getattr(response, "output_text", None)
-                if not content:
-                    blocks = getattr(response, "output", None)
-                    if blocks:
-                        first = blocks[0]
-                        parts = getattr(first, "content", None)
-                        if parts:
-                            content = parts[0].text  # type: ignore[index]
-                if not content:
-                    choices = getattr(response, "choices", None)
-                    if choices:
-                        message = getattr(choices[0], "message", None)
-                        if message is not None:
-                            content_piece = getattr(message, "content", None)
-                            if isinstance(content_piece, list) and content_piece:
-                                content = content_piece[0].get("text")
-                            elif isinstance(content_piece, str):
-                                content = content_piece
+                
+                # 简化响应处理逻辑
+                content = None
+                if hasattr(response, 'choices') and response.choices:
+                    message = response.choices[0].message
+                    if hasattr(message, 'content') and message.content:
+                        content = message.content
+                
                 if not content:
                     raise ValueError("Empty LLM response")
+                    
                 parsed = json.loads(content)
                 decision = DiscardDecision(
                     discard_indices=list(parsed.get("discard_indices", [])),
                     rationale=parsed.get("rationale"),
                 )
                 return decision
-            except Exception:
+            except Exception as e:
+                # 提供用户友好的错误提示
+                if "insufficient_quota" in str(e):
+                    if not self._quota_error_shown:  # 只显示一次详细提示
+                        print("💳 OpenAI API配额不足!")
+                        print("   原因：OpenAI现在要求添加付费方式才能使用API")
+                        print("   解决方案：")
+                        print("   1. 访问 https://platform.openai.com/account/billing/overview")
+                        print("   2. 添加信用卡或借记卡作为付费方式")
+                        print("   3. 设置使用限额（可设置低金额如$5）")
+                        print("   4. 程序将自动回退到保守策略继续运行")
+                        self._quota_error_shown = True
+                elif "model_not_found" in str(e):
+                    print(f"🤖 模型 {self.model} 不可用，请检查模型名称或权限")
+                elif "Connection error" in str(e):
+                    print("🌐 网络连接错误，请检查代理设置或网络连接")
+                
                 self._metrics.invalid_responses += 1
                 if attempt >= self.max_retries:
                     break

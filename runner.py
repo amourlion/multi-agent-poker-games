@@ -156,6 +156,18 @@ def main(argv: Optional[list[str]] = None) -> None:
         temperature=args.temperature,
         cache_path=args.cache_path,
     )
+    
+    # 检查API Key状态并输出提示
+    import os
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        print(f"✅ OpenAI API Key 已设置，LLM代理将使用模型: {args.model}")
+        print(f"🤖 开始运行 随机代理 vs LLM智能代理 对战...")
+    else:
+        print("⚠️  未检测到 OpenAI API Key，LLM代理将使用保守策略回退")
+        print("🎲 开始运行 随机代理 vs 保守策略代理 对战...")
+    print(f"🎮 总共进行 {args.games} 局游戏\n")
+    
     engine = FiveCardDrawEngine(agent_random, agent_llm, rng=rng)
     logger: Optional[GameLogger] = None
     if args.log:
@@ -173,6 +185,23 @@ def main(argv: Optional[list[str]] = None) -> None:
         logger.close()
     agent_llm.flush_cache()
     summary = stats.summary(agent_llm.metrics())
+    
+    # 输出结果提示
+    llm_metrics = agent_llm.metrics()
+    api_calls = llm_metrics.get("api_calls", 0)
+    fallbacks = llm_metrics.get("fallbacks", 0)
+    
+    print("\n" + "="*50)
+    print("🏁 游戏结束统计:")
+    if api_calls > 0:
+        print(f"✅ LLM API 调用次数: {api_calls}")
+        print(f"📈 缓存命中率: {llm_metrics.get('cache_hit_rate', 0):.2%}")
+        if fallbacks > 0:
+            print(f"⚠️  回退到保守策略次数: {fallbacks}")
+    else:
+        print("🔒 未使用 LLM API (全部使用保守策略回退)")
+    print("="*50 + "\n")
+    
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
