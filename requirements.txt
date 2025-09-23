@@ -1,0 +1,4 @@
+openai>=1.14
+pydantic
+Typer
+pytest

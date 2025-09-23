@@ -8,10 +8,13 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
-import importlib.util
-
 from deck import Card, hand_to_str
 from game_types import DecisionContext, DecisionRules, DiscardDecision
+
+try:
+    from openai import AzureOpenAI  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    AzureOpenAI = None  # type: ignore
 
 
 DEFAULT_API_VERSION = "2025-01-01-preview"
@@ -174,22 +177,21 @@ class LLMAgent:
 
     @staticmethod
     def create_default_client() -> Any:
-        spec = importlib.util.find_spec("openai")
-        if spec is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        if spec.loader is None:  # pragma: no cover - defensive
-            return None
-        spec.loader.exec_module(module)  # type: ignore[no-untyped-call]
-
-        client_cls = getattr(module, "AzureOpenAI", None)
-        if client_cls is None:
+        if AzureOpenAI is None:
+            print(
+                "⚠️ 未安装 openai 库（或版本过旧），"
+                "请运行 `uv pip install \"openai>=1.14\"` 后重试"
+            )
             return None
 
         api_key = os.environ.get("AZURE_OPENAI_API_KEY")
         endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
         api_version = os.environ.get("OPENAI_API_VERSION", DEFAULT_API_VERSION)
         if not api_key or not endpoint:
+            print(
+                "⚠️ 缺少 AZURE_OPENAI_API_KEY 或 AZURE_OPENAI_ENDPOINT 环境变量，"
+                "LLM 代理将回退到保守策略"
+            )
             return None
 
         # 检查代理设置
@@ -199,7 +201,7 @@ class LLMAgent:
         if http_proxy or https_proxy:
             print(f"🌐 检测到代理设置: HTTP={http_proxy}, HTTPS={https_proxy}")
 
-        return client_cls(
+        return AzureOpenAI(
             api_key=api_key,
             azure_endpoint=endpoint,
             api_version=api_version,

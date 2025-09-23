@@ -22,15 +22,21 @@ cd multi-agent-poker-games
 
 ### 2. 安装依赖
 
-项目使用 Python 3.10+。推荐在虚拟环境中安装依赖：
+项目使用 Python 3.10+。推荐使用 [uv](https://github.com/astral-sh/uv) 管理虚拟环境与依赖：
 
 ```bash
-python -m venv .venv
+uv venv
 source .venv/bin/activate  # Windows 使用 .venv\Scripts\activate
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
-> 如果仓库尚未提供 `requirements.txt`，请根据自身环境安装 `openai`、`pydantic`、`typer` 等依赖，或使用 `pip install -e .` 安装自定义包。
+若仓库尚未提供 `requirements.txt`，可直接安装关键依赖：
+
+```bash
+uv pip install "openai>=1.14" pydantic typer
+```
+
+（如更习惯传统 `python -m venv`/`pip` 流程，也可继续沿用。）
 
 ### 3. 配置 Azure OpenAI（启用 LLM 必需）
 
@@ -80,6 +86,12 @@ set OPENAI_API_VERSION=2025-01-01-preview
 
 ```bash
 python runner.py --games 3 --seed 42 --max-discards 5 --log out.jsonl
+```
+
+若调用失败，可执行诊断脚本查看环境配置与 API 错误：
+
+```bash
+python scripts/check_azure_openai.py
 ```
 
 ### ⚠️ 运行提示
@@ -146,9 +158,11 @@ pytest
 
 ## 扩展方向
 
-- 新增自定义策略：实现 `agent_random.py` 中的接口即可接入。
-- 替换日志管道：`logger.py` 支持结构化输出，可接入数据库或可视化工具。
-- 批量实验：结合缓存、速率限制与 PRD 中的优化建议，构建大规模对战分析。
+- 实现多个agent的系统
+- 实现每个agent可以选择是否是random或者LLM
+- 可视化结果：`logger.py` 支持结构化输出，可接入数据库或可视化工具。
+- 实现可视化界面后，允许玩家接入游戏进行游玩。
+- 初始化资金且允许下注：每个agent有可调整的初始资金，每一轮游戏按照agent序号顺序进行check or bet，一旦有一个agent做出了bet，下一位agent应该选择call，raise，fold中的一个选择，一轮游戏结束后，还处于游戏的玩家应该可以discard或者不换牌，直到有agent赢得了pot中所有的筹码。
 
 ## 反馈与贡献
 
