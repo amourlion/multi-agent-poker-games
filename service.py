@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from flask import Flask, abort, jsonify, request
+from flask import Flask, abort, jsonify, request, make_response
 
 from agent_llm import LLMAgent
 from agent_random import RandomAgent
@@ -31,6 +31,15 @@ SESSIONS: Dict[str, GameSession] = {}
 app = Flask(__name__)
 
 DEFAULT_MODEL = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o-new")
+
+
+@app.after_request
+def add_cors_headers(response):  # pragma: no cover - simple header addition
+    response.headers.setdefault("Access-Control-Allow-Origin", "*")
+    response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    response.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    response.headers.setdefault("Access-Control-Max-Age", "3600")
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -120,11 +129,28 @@ def _serialize_events(events) -> List[Dict[str, Any]]:
 def _serialize_hand(hand: InteractiveHand) -> Dict[str, Any]:
     actor = hand.peek_current_actor()
     active_player = actor.player_id if actor else None
+    betting_context = None
     available_actions: Optional[List[str]] = None
-    if actor is not None:
+    if actor is not None and hand.phase == hand.PHASE_BETTING:
         context = hand.betting_context(actor)
         available_actions = [action.value for action in context.available_actions]
+        betting_context = {
+            "player_id": actor.player_id,
+            "to_call": context.to_call,
+            "current_bet": context.current_bet,
+            "min_bet": context.min_bet,
+            "min_raise": context.min_raise,
+            "stack": context.stack,
+            "committed": context.committed,
+        }
     next_discard = hand.peek_next_discard()
+    draw_context = None
+    if hand.phase == hand.PHASE_DRAW:
+        draw_context = {
+            "player_id": next_discard.player_id if next_discard else None,
+            "max_discards": hand._engine.rules.max_discards,
+            "hand_size": len(next_discard.hand_after) if next_discard else 0,
+        }
 
     return {
         "game_id": hand.game_id,
@@ -134,6 +160,8 @@ def _serialize_hand(hand: InteractiveHand) -> Dict[str, Any]:
         "active_player": active_player,
         "available_actions": available_actions,
         "next_discard_player": next_discard.player_id if next_discard else None,
+        "betting_context": betting_context,
+        "draw_context": draw_context,
         "players": [_serialize_player(player) for player in hand.players],
         "events": _serialize_events(hand.events),
     }
@@ -156,8 +184,10 @@ def _ensure_game_not_complete(session: GameSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/games")
+@app.route("/api/games", methods=["POST", "OPTIONS"])
 def create_game():
+    if request.method == "OPTIONS":
+        return make_response("", 204)
     payload = request.get_json(force=True, silent=False)
     if not payload or "seats" not in payload:
         abort(400, description="Missing seats definition")
@@ -182,8 +212,10 @@ def create_game():
         abort(400, description=str(exc))
 
 
-@app.get("/api/games/<game_id>")
+@app.route("/api/games/<game_id>", methods=["GET", "OPTIONS"])
 def get_game(game_id: str):
+    if request.method == "OPTIONS":
+        return make_response("", 204)
     session = _get_session(game_id)
     return jsonify(
         {
@@ -194,8 +226,10 @@ def get_game(game_id: str):
     )
 
 
-@app.post("/api/games/<game_id>/action")
+@app.route("/api/games/<game_id>/action", methods=["POST", "OPTIONS"])
 def apply_action(game_id: str):
+    if request.method == "OPTIONS":
+        return make_response("", 204)
     session = _get_session(game_id)
     _ensure_game_not_complete(session)
     payload = request.get_json(force=True, silent=False) or {}
@@ -216,8 +250,20 @@ def apply_action(game_id: str):
             bet_action = BettingAction(action_name.lower())
         except ValueError as exc:  # noqa: BLE001
             abort(400, description=str(exc))
+        context = hand.betting_context(player)
         amount = int(payload.get("amount", 0))
         rationale = payload.get("rationale")
+
+        if bet_action == BettingAction.CALL:
+            amount = context.to_call
+        elif bet_action == BettingAction.BET:
+            minimum = max(context.min_bet, 1)
+            if amount < minimum:
+                abort(400, description=f"Bet must be at least {minimum}")
+        elif bet_action == BettingAction.RAISE:
+            minimum_total = context.to_call + max(context.min_raise, 1)
+            if amount < minimum_total:
+                abort(400, description=f"Raise must total at least {minimum_total}")
         decision = BetDecision(bet_action, amount, rationale)
         hand.apply_bet_decision(player, decision)
         hand.progress_after_betting()
@@ -226,7 +272,12 @@ def apply_action(game_id: str):
         if hand.phase != hand.PHASE_DRAW:
             abort(400, description="Not in draw phase")
         player_id = int(payload.get("player_id"))
-        player = hand.get_player(player_id)
+        next_player = hand.peek_next_discard()
+        if next_player is None or next_player.player_id != player_id:
+            abort(400, description="Not this player's turn to discard")
+        player = hand.next_to_discard()
+        if player is None:
+            abort(400, description="No player available to discard")
         indices = payload.get("discard_indices", [])
         if not isinstance(indices, list):
             abort(400, description="discard_indices must be a list")
@@ -239,6 +290,8 @@ def apply_action(game_id: str):
         actor = hand.peek_current_actor()
         if actor is None:
             abort(400, description="No actor available")
+        if actor.seat.agent is None:
+            abort(400, description="Active seat is human; use manual bet")
         decision = hand.auto_bet_for(actor)
         hand.apply_bet_decision(actor, decision)
         hand.progress_after_betting()
@@ -246,11 +299,61 @@ def apply_action(game_id: str):
     elif action_type == "auto_discard":
         if hand.phase != hand.PHASE_DRAW:
             abort(400, description="Not in draw phase")
-        player = hand.peek_next_discard()
+        player_peek = hand.peek_next_discard()
+        if player_peek is None:
+            abort(400, description="No player pending discard")
+        if player_peek.seat.agent is None:
+            abort(400, description="Pending seat is human; send discard decision")
+        player = hand.next_to_discard()
         if player is None:
             abort(400, description="No player pending discard")
         decision = hand.auto_discard_for(player)
         hand.apply_discard(player, decision)
+
+    elif action_type == "auto_until_human":
+        made_progress = False
+
+        while hand.phase == hand.PHASE_BETTING:
+            peek_actor = hand.peek_current_actor()
+            if peek_actor is None:
+                hand.progress_after_betting()
+                made_progress = True
+                if hand.phase != hand.PHASE_BETTING:
+                    break
+                continue
+            if peek_actor.seat.agent is None:
+                break
+            actor = hand.current_actor()
+            if actor is None:
+                break
+            decision = hand.auto_bet_for(actor)
+            hand.apply_bet_decision(actor, decision)
+            hand.progress_after_betting()
+            made_progress = True
+
+        while hand.phase == hand.PHASE_DRAW:
+            peek_player = hand.peek_next_discard()
+            if peek_player is None:
+                hand.phase = hand.PHASE_SHOWDOWN
+                made_progress = True
+                break
+            if peek_player.seat.agent is None:
+                break
+            player = hand.next_to_discard()
+            if player is None:
+                break
+            decision = hand.auto_discard_for(player)
+            hand.apply_discard(player, decision)
+            made_progress = True
+
+        if not made_progress:
+            actor = hand.peek_current_actor()
+            if actor and actor.seat.agent is None:
+                abort(400, description="Human seat is next to act")
+            if hand.phase == hand.PHASE_DRAW:
+                player = hand.peek_next_discard()
+                if player and player.seat.agent is None:
+                    abort(400, description="Human seat pending discard")
 
     elif action_type == "advance":
         if hand.phase == hand.PHASE_BETTING:
@@ -265,7 +368,10 @@ def apply_action(game_id: str):
             abort(400, description="Not ready for showdown")
         session.result = hand.showdown()
     elif action_type == "auto_play":
-        session.result = hand.auto_play()
+        try:
+            session.result = hand.auto_play()
+        except RuntimeError as exc:
+            abort(400, description=str(exc))
     else:
         abort(400, description=f"Unknown action type: {action_type}")
 
@@ -281,8 +387,10 @@ def apply_action(game_id: str):
     )
 
 
-@app.post("/api/games/<game_id>/reset")
+@app.route("/api/games/<game_id>/reset", methods=["POST", "OPTIONS"])
 def reset_game(game_id: str):
+    if request.method == "OPTIONS":
+        return make_response("", 204)
     session = _get_session(game_id)
     seed = request.get_json(force=True, silent=True) or {}
     rng = random.Random(seed.get("seed")) if seed.get("seed") is not None else random.Random()

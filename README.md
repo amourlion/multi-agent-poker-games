@@ -105,34 +105,61 @@ python runner.py --agents alice:llm:llm,bob:random,charlie:llm:heuristic,dana:ra
 
 这样一来，未来的 Next.js / Web 服务可以直接调用这些接口，把真人下注或弃牌决策注入流程，而现有 CLI 与实验脚本继续基于 `engine.py`，互不影响。
 
-#### 面向前端的主要接口
+#### 面向前端的 REST API
 
-- **初始化与座位信息**：
-  ```python
-  from engine_interactive import InteractiveFiveCardDrawEngine
-  engine = InteractiveFiveCardDrawEngine(seats, rules=DecisionRules(...), rng=Random(seed))
-  hand = engine.start_hand(game_id)
+`service.py` 提供的 HTTP 接口基于 Flask，适用于 Next.js 等前端应用：
+
+- `POST /api/games`
+  - **请求体**：
+    ```json
+    {
+      "seats": [
+        {"name": "Alice", "type": "llm", "bet_mode": "heuristic", "stack": 500},
+        {"name": "Bob", "type": "random", "stack": 400},
+        {"name": "Cara", "type": "human", "stack": 400}
+      ],
+      "rules": {"min_bet": 20, "ante": 0, "max_discards": 5, "max_raises": 3},
+      "seed": 123,
+      "game_number": 1
+    }
+    ```
+    座位 `type` 支持 `random` / `llm` / `human`，`bet_mode` 指定 LLM 的下注策略（`heuristic` 或 `llm`）。
+  - **响应**：`201 Created`，返回 `game_id`、当前 `state`（下注玩家、手牌、可选动作、事件流），`result` 初始为 `null`。
+
+- `GET /api/games/<game_id>`
+  - **响应**：最新 `state` 与 `result`，方便实时轮询或页面刷新。
+
+- `POST /api/games/<game_id>/action`
+  - **请求体**：根据 `type` 不同驱动不同流程：
+    - `{"type": "bet", "player_id": 0, "action": "check", "amount": 0, "rationale": "..."}`
+    - `{"type": "discard", "player_id": 2, "discard_indices": [0, 1], "rationale": "..."}`
+    - `{"type": "auto_bet"}` / `{"type": "auto_discard"}` 让座位按代理自动执行。
+  - `{"type": "advance"}` 手动推进到下一个阶段（下注 → 换牌 → 摊牌）。
+  - `{"type": "resolve"}` 在 `showdown` 阶段结算；`{"type": "auto_play"}` 则直接自动跑完整局。
+  - `{"type": "auto_until_human"}` 循环执行 AI 座位动作，直至轮到真人或进入下一阶段。
+  - **响应**：更新后的 `state` 与（若完成）`result`。
+
+- `POST /api/games/<game_id>/reset`
+  - **请求体（可选）**：`{"seed": 456, "game_number": 2}`
+  - **效果**：重置同一桌的随机种子与局号，返回新的初始状态。
+
+> `tests/test_service_api.py` 展示了完整示例，涵盖手动下注、AI 操作、换牌到最终结算。借助这些接口，前端可以实现实时的下注面板、手牌展示、事件回放等功能，而 CLI 仍保留原有 `engine.py` 实验流程。
+
+### Next.js 前端（`frontend/`）
+
+- `frontend/` 目录包含一个 Next.js 14 应用，用于配置座位、显示游戏状态、触发 REST API。
+- 运行示例：
+  ```bash
+  cd frontend
+  npm install   # 或 yarn install / pnpm install。离线环境下可提前准备 node_modules
+  npm run dev   # 启动开发服务器，默认 http://localhost:3000
   ```
-  `seats` 仍复用 `engine.py` 中的 `PlayerSeat`，可混合真人座位（`agent=None`）与各类 AI 代理。
-
-- **下注阶段**：
-  - 使用 `hand.current_actor()` 轮询当前需要行动的玩家。
-  - 通过 `hand.betting_context(player)` 获取 `BettingContext`，其中包含 `available_actions`、`to_call`、`pot` 等信息，便于前端展示。
-  - 将玩家选择的动作封装为 `BetDecision` 并调用 `hand.apply_bet_decision(player, decision)`；若为 AI 座位，可直接调 `agent.decide_bet(...)` 生成决策。
-  - 事件记录可在 `hand.events` 中读取，每个事件结构形如 `{"type": "bet", "payload": {...}}`，适合前端用于实时更新 UI。
-
-- **弃牌/换牌阶段**：
-  - 调用 `hand.begin_draw_phase()` 进入换牌。
-  - 通过 `hand.next_to_discard()` 获取下一位需要操作的玩家，直至返回 `None`。
-  - 玩家给出 `DiscardDecision` 后执行 `hand.apply_discard(player, decision)`，同样会附带事件。
-
-- **结算与输赢**：
-  - 当 `hand.phase` 为 `hand.PHASE_SHOWDOWN` 时，调用 `hand.showdown()` 返回最终 `GameResult`，包含赢家、每位玩家的 `PlayerResult` 以及最新 bankroll。
-  - 如果需要完整自动化，可直接使用 `engine.autoplay_hand(game_id)`。
-
-- **事件回放/存储**：`hand.events` 中记录了 `hand_start`、`bet`、`discard` 等阶段性事件，建议前端或服务端在每次状态更新后持久化，用于实时推送或赛后回放。
-
-以上接口确保 Web 前端可在不修改原有实验流程的前提下，实现真人玩家加入、实时下注/弃牌交互以及可视化展示。
+- 应用依赖环境变量 `NEXT_PUBLIC_API_BASE_URL`（默认 `http://127.0.0.1:8000`）访问后端接口，可在 `.env.local` 中覆写。
+- 首页功能：
+  - 座位表单：混合 LLM / random / human 座位与下注模式。
+  - 状态看板：阶段、彩池、手牌、事件流。
+  - 操作按钮：调用 `/action` 接口执行手动或自动下注、弃牌、结算。
+- 核心代码位于 `frontend/components/` 与 `frontend/lib/api.ts`，可作为 Next.js 集成 REST API 的示例，也便于扩展成更复杂的 Web UI。
 
 ### Flask 风格 API（`service.py`）
 
