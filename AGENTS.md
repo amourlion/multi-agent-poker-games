@@ -8,6 +8,8 @@ Always activate the repo-managed uv environment (`source .venv/bin/activate`) be
 
 LLM seats now support selectable betting strategies. Use `--bet-mode heuristic|llm` (global default), supply `--bet-modes` to specify per seat, or embed the mode in the agent spec via `name:type:mode` (e.g., `alice:llm:llm`). In `llm` mode the agent will request betting actions from Azure OpenAI; ensure credentials are configured or the logic will fallback to the heuristic.
 
+要构建 Web/交互式体验，可引入 `engine_interactive.py`：它提供 `InteractiveFiveCardDrawEngine` 与逐步的 `InteractiveHand` 接口，允许覆盖下注/弃牌动作并回放事件流，同时保持 CLI 的 `engine.py` 不变。
+
 ## Coding Style & Naming Conventions
 All Python modules follow PEP 8: four-space indentation, snake_case for functions, and CapWords for dataclasses and enums. Maintain module-level docstrings similar to the existing files, and favor explicit type hints, especially for public methods and data structures. Keep new modules in lowercase filenames and colocate helper utilities near their consumers.
 

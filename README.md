@@ -95,6 +95,56 @@ python runner.py --agents alice:llm:llm,bob:random,charlie:llm:heuristic,dana:ra
     --bet-mode heuristic --games 10 --seed 7 --funds 600,400,400,300,500 --min-bet 50
 ```
 
+### 交互式引擎（供 Web / UI 集成）
+
+项目新增 `engine_interactive.py`，提供更细粒度的游戏循环：
+
+- `InteractiveFiveCardDrawEngine` 负责构建手牌，支持复用当前座位配置。
+- `InteractiveHand` 暴露逐步接口（`current_actor()`, `betting_context()`, `apply_bet_decision()`, `begin_draw_phase()`, `apply_discard()` 等），便于暂停等待真人玩家操作。
+- `autoplay_hand(game_id)` 可一次性跑完整局，方便将结果与 `engine.py` 的实验模式对照。
+
+这样一来，未来的 Next.js / Web 服务可以直接调用这些接口，把真人下注或弃牌决策注入流程，而现有 CLI 与实验脚本继续基于 `engine.py`，互不影响。
+
+#### 面向前端的主要接口
+
+- **初始化与座位信息**：
+  ```python
+  from engine_interactive import InteractiveFiveCardDrawEngine
+  engine = InteractiveFiveCardDrawEngine(seats, rules=DecisionRules(...), rng=Random(seed))
+  hand = engine.start_hand(game_id)
+  ```
+  `seats` 仍复用 `engine.py` 中的 `PlayerSeat`，可混合真人座位（`agent=None`）与各类 AI 代理。
+
+- **下注阶段**：
+  - 使用 `hand.current_actor()` 轮询当前需要行动的玩家。
+  - 通过 `hand.betting_context(player)` 获取 `BettingContext`，其中包含 `available_actions`、`to_call`、`pot` 等信息，便于前端展示。
+  - 将玩家选择的动作封装为 `BetDecision` 并调用 `hand.apply_bet_decision(player, decision)`；若为 AI 座位，可直接调 `agent.decide_bet(...)` 生成决策。
+  - 事件记录可在 `hand.events` 中读取，每个事件结构形如 `{"type": "bet", "payload": {...}}`，适合前端用于实时更新 UI。
+
+- **弃牌/换牌阶段**：
+  - 调用 `hand.begin_draw_phase()` 进入换牌。
+  - 通过 `hand.next_to_discard()` 获取下一位需要操作的玩家，直至返回 `None`。
+  - 玩家给出 `DiscardDecision` 后执行 `hand.apply_discard(player, decision)`，同样会附带事件。
+
+- **结算与输赢**：
+  - 当 `hand.phase` 为 `hand.PHASE_SHOWDOWN` 时，调用 `hand.showdown()` 返回最终 `GameResult`，包含赢家、每位玩家的 `PlayerResult` 以及最新 bankroll。
+  - 如果需要完整自动化，可直接使用 `engine.autoplay_hand(game_id)`。
+
+- **事件回放/存储**：`hand.events` 中记录了 `hand_start`、`bet`、`discard` 等阶段性事件，建议前端或服务端在每次状态更新后持久化，用于实时推送或赛后回放。
+
+以上接口确保 Web 前端可在不修改原有实验流程的前提下，实现真人玩家加入、实时下注/弃牌交互以及可视化展示。
+
+### Flask 风格 API（`service.py`）
+
+- 提供 `/api/games` (POST) 创建对局，返回 `game_id` 与当前状态。
+- `/api/games/<game_id>` (GET) 获取最新状态与最终结果。
+- `/api/games/<game_id>/action` (POST) 驱动流程：
+  - `{"type": "bet", "player_id": 0, "action": "check"}` 手动下注。
+  - `{"type": "auto_bet"}` / `{"type": "auto_discard"}` 代为执行 AI 动作。
+  - `{"type": "discard", "player_id": 1, "discard_indices": [0,1]}` 手动弃牌。
+  - `{"type": "resolve"}` 或 `{"type": "auto_play"}` 直接结算。
+- `/api/games/<game_id>/reset` 可复位对局（可选 seed/game_number）。
+
 若调用失败，可执行诊断脚本查看环境配置与 API 错误：
 
 ```bash

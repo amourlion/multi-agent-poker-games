@@ -2,3 +2,4 @@ openai>=1.14
 pydantic
 typer
 pytest
+flask
