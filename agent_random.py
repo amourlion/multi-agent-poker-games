@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import List
 
 from deck import Card
-from game_types import DecisionContext, DecisionRules, DiscardDecision
+from game_types import (
+    BetDecision,
+    BettingAction,
+    BettingContext,
+    DecisionContext,
+    DecisionRules,
+    DiscardDecision,
+)
 
 
 class RandomAgent:
@@ -28,6 +35,33 @@ class RandomAgent:
         discard = sorted(indices[:count])
         return DiscardDecision(discard, rationale="Random baseline")
 
+    def decide_bet(
+        self, hand: List[Card], context: BettingContext
+    ) -> BetDecision:
+        actions = list(context.available_actions)
+        choice = context.rng.choice(actions)
+
+        if choice == BettingAction.CHECK:
+            return BetDecision(action=choice, rationale="Random: check")
+
+        if choice == BettingAction.FOLD:
+            return BetDecision(action=choice, rationale="Random: fold")
+
+        if choice == BettingAction.CALL:
+            amount = min(context.to_call, context.stack)
+            return BetDecision(action=choice, amount=amount, rationale="Random: call")
+
+        # Betting or raising: pick smallest legal amount for simplicity
+        if choice == BettingAction.BET:
+            amount = max(context.min_bet, 0)
+            amount = min(amount, context.stack)
+            return BetDecision(action=choice, amount=amount, rationale="Random: bet")
+
+        # Raise
+        raise_amount = max(context.min_raise, 0)
+        target = context.to_call + raise_amount
+        target = min(target, context.stack)
+        return BetDecision(action=choice, amount=target, rationale="Random: raise")
+
 
 __all__ = ["RandomAgent"]
-

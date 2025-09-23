@@ -9,7 +9,15 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 from deck import Card, hand_to_str
-from game_types import DecisionContext, DecisionRules, DiscardDecision
+from game_types import (
+    BetDecision,
+    BettingAction,
+    BettingContext,
+    DecisionContext,
+    DecisionRules,
+    DiscardDecision,
+)
+from hand_eval import evaluate_hand
 
 try:
     from openai import AzureOpenAI  # type: ignore
@@ -131,6 +139,41 @@ SYSTEM_PROMPT = (
 )
 
 
+BET_JSON_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "BetDecision",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [action.value for action in BettingAction],
+                },
+                "amount": {
+                    "type": "integer",
+                    "minimum": 0,
+                },
+                "rationale": {
+                    "type": "string",
+                },
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+BET_SYSTEM_PROMPT = (
+    "You are a poker betting assistant for Five-card draw.\n"
+    "Only one betting round occurs before the draw.\n"
+    "Choose the best action among the allowed options.\n"
+    "If the evaluated hand is already strong (pairs or better), favour aggressive betting/raising even if it means higher risk.\n"
+    "Respond strictly with the required JSON schema."
+)
+
+
 @dataclass
 class LLMAgentMetrics:
     cache_hits: int = 0
@@ -164,6 +207,7 @@ class LLMAgent:
         timeout: float = 5.0,
         client: Optional[Any] = None,
         cache_path: Optional[str] = None,
+        bet_mode: str = "heuristic",
     ) -> None:
         self.model = model
         self.temperature = temperature
@@ -174,6 +218,7 @@ class LLMAgent:
         self._cache = DecisionCache(cache_path)
         self._metrics = LLMAgentMetrics()
         self._quota_error_shown = False  # 标记是否已显示配额错误提示
+        self.bet_mode = bet_mode if bet_mode in {"heuristic", "llm"} else "heuristic"
 
     @staticmethod
     def create_default_client() -> Any:
@@ -321,6 +366,184 @@ class LLMAgent:
         if len(indices) > rules.max_discards:
             return False
         return True
+
+    def decide_bet(
+        self, hand: List[Card], context: BettingContext
+    ) -> BetDecision:
+        if self.bet_mode == "llm":
+            client = self._ensure_client()
+            if client is not None:
+                decision = self._call_bet_llm_with_retries(client, hand, context)
+                if decision and self._validate_bet(decision, context):
+                    return decision
+        evaluation = evaluate_hand(hand)
+        available = set(context.available_actions)
+        strength = evaluation.rank_id
+        rng = context.rng
+
+        if BettingAction.CHECK in available and context.to_call == 0:
+            can_bet = (
+                BettingAction.BET in available and context.stack >= context.min_bet
+            )
+            should_bet = False
+            if can_bet:
+                if strength >= 4:  # straight or better
+                    should_bet = True
+                elif strength >= 2:  # two pair or better
+                    should_bet = rng.random() < 0.9
+                elif strength == 1:  # one pair
+                    should_bet = rng.random() < 0.75
+                else:  # high card
+                    should_bet = rng.random() < 0.5
+            if should_bet and can_bet:
+                if strength >= 4:
+                    divisor = 3
+                elif strength >= 2:
+                    divisor = 4
+                elif strength == 1:
+                    divisor = 6
+                else:
+                    divisor = 8
+                baseline = max(context.stack // divisor, context.min_bet)
+                amount = max(context.min_bet, baseline)
+                amount = min(amount, context.stack)
+                rationale = f"LLM heuristic: bet with {evaluation.rank_name}"
+                return BetDecision(BettingAction.BET, amount, rationale)
+            return BetDecision(BettingAction.CHECK, rationale="LLM heuristic: check")
+
+        call_amount = min(context.to_call, context.stack)
+
+        if BettingAction.CALL in available and call_amount > 0:
+            comfortable_call = max(context.min_bet, context.stack // 4)
+            speculative_call = max(context.min_bet, context.stack // 6)
+            if strength >= 4 or (
+                strength >= 2 and call_amount <= comfortable_call
+            ) or (
+                strength == 1 and call_amount <= comfortable_call
+            ) or (
+                strength == 0 and call_amount <= speculative_call and rng.random() < 0.6
+            ) or (
+                call_amount <= context.min_bet and rng.random() < 0.5
+            ):
+                if (
+                    BettingAction.RAISE in available
+                    and context.stack > call_amount + context.min_raise
+                ):
+                    raise_chance = 0.0
+                    if strength >= 6:
+                        raise_chance = 0.9
+                    elif strength >= 5:
+                        raise_chance = 0.8
+                    elif strength == 4:
+                        raise_chance = 0.65
+                    elif strength == 3:
+                        raise_chance = 0.45
+                    elif strength == 2:
+                        raise_chance = 0.3
+                    elif strength == 1:
+                        raise_chance = 0.2
+                    elif strength == 0:
+                        raise_chance = 0.1
+                    if rng.random() < raise_chance:
+                        desired = call_amount + max(context.min_raise, context.min_bet)
+                        raise_target = min(desired, context.stack)
+                        rationale = f"LLM heuristic: raise with {evaluation.rank_name}"
+                        return BetDecision(BettingAction.RAISE, raise_target, rationale)
+                rationale = f"LLM heuristic: call with {evaluation.rank_name}"
+                return BetDecision(BettingAction.CALL, call_amount, rationale)
+            if (
+                BettingAction.RAISE in available
+                and context.stack > call_amount + context.min_raise
+                and rng.random() < 0.25
+            ):
+                desired = call_amount + max(context.min_raise, context.min_bet)
+                raise_target = min(desired, context.stack)
+                rationale = f"LLM heuristic: semi-bluff raise with {evaluation.rank_name}"
+                return BetDecision(BettingAction.RAISE, raise_target, rationale)
+
+        if BettingAction.FOLD in available:
+            return BetDecision(BettingAction.FOLD, rationale="LLM heuristic: fold weak hand")
+
+        if BettingAction.CALL in available:
+            return BetDecision(
+                BettingAction.CALL,
+                call_amount,
+                rationale="LLM fallback: forced call",
+            )
+
+        return BetDecision(BettingAction.CHECK, rationale="LLM fallback: forced check")
+
+    def _validate_bet(self, decision: BetDecision, context: BettingContext) -> bool:
+        if decision.action not in context.available_actions:
+            return False
+        if decision.amount < 0:
+            return False
+        if decision.action == BettingAction.CALL and decision.amount > context.stack:
+            return False
+        return True
+
+    def _call_bet_llm_with_retries(
+        self, client: Any, hand: List[Card], context: BettingContext
+    ) -> Optional[BetDecision]:
+        payload = {
+            "hand": hand_to_str(hand),
+            "hand_rank": evaluate_hand(hand).rank_name,
+            "pot": context.pot,
+            "to_call": context.to_call,
+            "current_bet": context.current_bet,
+            "stack": context.stack,
+            "min_bet": context.min_bet,
+            "min_raise": context.min_raise,
+            "available_actions": [action.value for action in context.available_actions],
+        }
+        messages = [
+            {"role": "system", "content": BET_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                self._metrics.api_calls += 1
+                response = client.chat.completions.create(  # type: ignore[attr-defined]
+                    model=self.model,
+                    temperature=self.temperature,
+                    response_format=BET_JSON_SCHEMA,
+                    messages=messages,
+                    timeout=self.timeout,
+                )
+                content = None
+                if hasattr(response, "choices") and response.choices:
+                    message = response.choices[0].message
+                    if hasattr(message, "content") and message.content:
+                        content = message.content
+                if not content:
+                    raise ValueError("Empty LLM response")
+
+                parsed = json.loads(content)
+                action_raw = parsed.get("action")
+                if not isinstance(action_raw, str):
+                    raise ValueError("Invalid action returned")
+                action_value = action_raw.lower()
+                try:
+                    action = BettingAction(action_value)
+                except ValueError as exc:
+                    raise ValueError(f"Unsupported action: {action_value}") from exc
+                amount = parsed.get("amount", 0)
+                if not isinstance(amount, int):
+                    raise ValueError("Amount must be integer")
+                rationale = parsed.get("rationale")
+                return BetDecision(action=action, amount=amount, rationale=rationale)
+            except Exception as exc:  # noqa: BLE001
+                self._metrics.invalid_responses += 1
+                if self.bet_mode == "llm":
+                    if "insufficient_quota" in str(exc) and not self._quota_error_shown:
+                        print("💳 OpenAI API配额不足 (betting call)!")
+                        self._quota_error_shown = True
+                if attempt >= self.max_retries:
+                    break
+                backoff = 0.5 * (2 ** (attempt - 1))
+                time.sleep(backoff)
+        self._metrics.fallbacks += 1
+        return None
 
 
 __all__ = [

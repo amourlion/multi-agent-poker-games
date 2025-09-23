@@ -85,7 +85,14 @@ set OPENAI_API_VERSION=2025-01-01-preview
 使用命令行工具 `runner.py` 启动多局对战模拟：
 
 ```bash
-python runner.py --games 3 --seed 42 --max-discards 5 --log out.jsonl
+python runner.py --agents alice:llm,bob:random,charlie:random --games 10 --seed 42 --funds 600,400,400 --min-bet 20 --log out.jsonl
+```
+
+五座位混合示例（两名 LLM 使用推理下注、两名随机、另一名使用 heuristic 下注）：
+
+```bash
+python runner.py --agents alice:llm:llm,bob:random,charlie:llm:heuristic,dana:random,erin:llm:llm \
+    --bet-mode heuristic --games 10 --seed 7 --funds 600,400,400,300,500 --min-bet 50
 ```
 
 若调用失败，可执行诊断脚本查看环境配置与 API 错误：
@@ -116,11 +123,18 @@ python scripts/check_azure_openai.py
 
 - `--games`：模拟的对局数。
 - `--seed`：随机数种子，方便复现实验。
+- `--agents`：逗号分隔的座位定义，可用 `name:type[:bet]` 指定玩家、类型（`random` / `llm`）与下注模式（`heuristic` / `llm`）。
+- `--initial-funds` / `--funds`：初始资金配置，支持为每个座位单独指定金额。
+- `--bet-mode` / `--bet-modes`：控制 LLM 座位的下注策略，默认 `heuristic`，可通过列表或 `--agents` 中的 `:bet` 覆写。
 - `--max-discards`：允许弃牌的最大张数（默认 5）。
+- `--min-bet` / `--ante`：下注最小额与前注设置。
+- `--max-raises`：单轮允许加注的次数上限。
 - `--model`：Azure 部署名称（默认读取 `AZURE_OPENAI_DEPLOYMENT_NAME`）。
 - `--log`：保存结构化对局日志的文件路径。支持 JSON Lines 或 CSV。
 
 当启用 LLM 代理时，系统会按 PRD 中约定的 JSON 契约与模型交互，并在解析失败时自动回退到保守策略。
+
+多智能体模式会自动维护每位玩家的资金以及下注逻辑，并在汇总中给出最终资金及盈亏变化：所有座位按顺序行动，在无人下注时可以选择 `check` 或 `bet`，一旦出现下注，后续玩家需要在 `call`、`raise`、`fold` 中做出选择。未弃牌的玩家完成换牌后比较牌力，赢家分享彩池并更新资金。对 LLM 座位，可选择 `heuristic` 模式使用内置下注策略，或 `llm` 模式让 Azure OpenAI 直接推理下注动作（缺少 API 时会自动回退到 heuristic）。
 
 ### 🔧 常见问题排查
 
@@ -160,8 +174,8 @@ pytest
 
 - 实现多个agent的系统
 - 实现每个agent可以选择是否是random或者LLM
-- 可视化结果：`logger.py` 支持结构化输出，可接入数据库或可视化工具。
-- 实现可视化界面后，允许玩家接入游戏进行游玩。
+- 采用next.js框架可视化结果：`logger.py` 支持结构化输出，可接入数据库或可视化工具。
+- 实现可视化界面后，允许玩家接入next.js实现的web端游戏进行游玩。
 - 初始化资金且允许下注：每个agent有可调整的初始资金，每一轮游戏按照agent序号顺序进行check or bet，一旦有一个agent做出了bet，下一位agent应该选择call，raise，fold中的一个选择，一轮游戏结束后，还处于游戏的玩家应该可以discard或者不换牌，直到有agent赢得了pot中所有的筹码。
 
 ## 反馈与贡献
