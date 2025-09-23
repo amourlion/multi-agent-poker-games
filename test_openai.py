@@ -4,25 +4,40 @@
 import os
 import sys
 
+from agent_llm import DEFAULT_API_VERSION, DEFAULT_DEPLOYMENT_NAME
+
 def test_openai_connection():
     try:
         import openai
         print("✅ OpenAI库已安装")
-        
-        # 检查API Key
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            print("❌ 未设置OPENAI_API_KEY环境变量")
+
+        client_cls = getattr(openai, "AzureOpenAI", None)
+        if client_cls is None:
+            print("❌ 当前OpenAI库缺少AzureOpenAI客户端")
             return False
-        
-        print(f"✅ API Key已设置: {api_key[:20]}...")
-        
+
+        api_key = os.environ.get("AZURE_OPENAI_API_KEY")
+        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+        deployment = os.environ.get(
+            "AZURE_OPENAI_DEPLOYMENT_NAME", DEFAULT_DEPLOYMENT_NAME
+        )
+        api_version = os.environ.get("OPENAI_API_VERSION", DEFAULT_API_VERSION)
+        if not api_key or not endpoint:
+            print("❌ 缺少 AZURE_OPENAI_API_KEY 或 AZURE_OPENAI_ENDPOINT 环境变量")
+            return False
+
+        print(f"✅ 使用Azure端点: {endpoint}")
+
         # 创建客户端
-        client = openai.OpenAI(api_key=api_key)
-        print("✅ OpenAI客户端创建成功")
-        
-        # 测试不同的模型
-        models_to_test = ["gpt-3.5-turbo", "gpt-4o-mini", "gpt-4"]
+        client = client_cls(
+            api_key=api_key,
+            azure_endpoint=endpoint,
+            api_version=api_version,
+        )
+        print("✅ Azure OpenAI客户端创建成功")
+
+        # 测试部署
+        models_to_test = [deployment]
         
         for model in models_to_test:
             try:

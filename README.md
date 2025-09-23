@@ -32,36 +32,47 @@ pip install -r requirements.txt
 
 > 如果仓库尚未提供 `requirements.txt`，请根据自身环境安装 `openai`、`pydantic`、`typer` 等依赖，或使用 `pip install -e .` 安装自定义包。
 
-### 3. 配置 OpenAI（可选）
+### 3. 配置 Azure OpenAI（启用 LLM 必需）
 
-若需启用 LLM 代理，请准备可用的 OpenAI API Key 并设置环境变量：
+LLM 代理现在通过 Azure OpenAI 接入，请在运行前设置以下环境变量：
+
+- `AZURE_OPENAI_API_KEY`：Azure OpenAI 密钥。
+- `AZURE_OPENAI_ENDPOINT`：资源端点，例如 `https://your-resource.openai.azure.com/`。
+- `AZURE_OPENAI_DEPLOYMENT_NAME`：部署名称，默认 `gpt-4o-new`。
+- `AZURE_OPENAI_MODEL`：模型别名，默认 `azure_openai:gpt-4o`。
+- `OPENAI_API_VERSION`：API 版本，默认 `2025-01-01-preview`。
 
 **Linux/macOS：**
 
 ```bash
-export OPENAI_API_KEY="sk-..."
+export AZURE_OPENAI_API_KEY="<your-key>"
+export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
+export AZURE_OPENAI_DEPLOYMENT_NAME="gpt-4o-new"      # 可自定义
+export AZURE_OPENAI_MODEL="azure_openai:gpt-4o"       # 可自定义
+export OPENAI_API_VERSION="2025-01-01-preview"        # 可自定义
 ```
 
 **Windows PowerShell：**
 
 ```powershell
-$env:OPENAI_API_KEY="sk-..."
+$env:AZURE_OPENAI_API_KEY="<your-key>"
+$env:AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com/"
+$env:AZURE_OPENAI_DEPLOYMENT_NAME="gpt-4o-new"
+$env:AZURE_OPENAI_MODEL="azure_openai:gpt-4o"
+$env:OPENAI_API_VERSION="2025-01-01-preview"
 ```
 
 **Windows 命令提示符：**
 
 ```cmd
-set OPENAI_API_KEY=sk-...
+set AZURE_OPENAI_API_KEY=<your-key>
+set AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+set AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o-new
+set AZURE_OPENAI_MODEL=azure_openai:gpt-4o
+set OPENAI_API_VERSION=2025-01-01-preview
 ```
 
-**永久设置（Windows）：**
-
-1. 右键点击"此电脑" → "属性" → "高级系统设置"
-2. 点击"环境变量"
-3. 在"用户变量"或"系统变量"中点击"新建"
-4. 变量名：`OPENAI_API_KEY`
-5. 变量值：`sk-...`（你的实际 API 密钥）
-6. 点击"确定"保存设置
+建议将实际密钥保存在 `.env` 文件，并使用 `direnv` 或 `python-dotenv` 在本地加载，同时确保 `.env` 已添加到 `.gitignore` 以避免泄露。
 
 ## 运行模拟
 
@@ -73,30 +84,28 @@ python runner.py --games 3 --seed 42 --max-discards 5 --log out.jsonl
 
 ### ⚠️ 运行提示
 
-**没有设置 OpenAI API Key 时：**
+**没有完整设置 Azure 环境变量时：**
 
-- 系统会显示：LLM 代理将回退到保守策略（fallback strategy）
-- 实际上是随机代理 vs 保守策略代理的对战
-- 输出统计中 `llm_metrics.api_calls` 将为 0，`fallbacks` 数量等于游戏局数
+- 程序会检测到缺失的密钥或端点并打印提示
+- LLM 代理将自动回退到保守策略
+- `llm_metrics.api_calls` 为 0，`fallbacks` 等于游戏局数
 
-**设置了 OpenAI API Key 但未添加付费方式时：**
+**密钥有效但 Azure 资源无额度时：**
 
-- 系统会显示：OpenAI API Key 已设置
-- 但会收到"insufficient_quota"错误，自动回退到保守策略
-- 这是因为OpenAI现在要求添加付费方式才能使用API，即使是免费额度
+- Azure OpenAI 会返回配额错误
+- 程序会输出指导信息并回退到保守策略
 
-**设置了有效 OpenAI API Key 且有付费方式时：**
+**密钥与额度均可用时：**
 
-- 系统会显示：LLM 代理正常调用 API
-- 实际上是随机代理 vs LLM 智能代理的对战
-- 输出统计中会显示真实的 API 调用次数、缓存命中率等指标
+- CLI 将显示所用部署和模型映射
+- 输出统计中会记录真实的 API 调用次数与缓存命中率
 
 ### 参数说明
 
 - `--games`：模拟的对局数。
 - `--seed`：随机数种子，方便复现实验。
 - `--max-discards`：允许弃牌的最大张数（默认 5）。
-- `--model`：LLM 代理调用的模型名称（如 `gpt-4.1-mini`）。
+- `--model`：Azure 部署名称（默认读取 `AZURE_OPENAI_DEPLOYMENT_NAME`）。
 - `--log`：保存结构化对局日志的文件路径。支持 JSON Lines 或 CSV。
 
 当启用 LLM 代理时，系统会按 PRD 中约定的 JSON 契约与模型交互，并在解析失败时自动回退到保守策略。

@@ -14,6 +14,11 @@ from deck import Card, hand_to_str
 from game_types import DecisionContext, DecisionRules, DiscardDecision
 
 
+DEFAULT_API_VERSION = "2025-01-01-preview"
+DEFAULT_DEPLOYMENT_NAME = "gpt-4o-new"
+DEFAULT_MODEL_ID = "azure_openai:gpt-4o"
+
+
 def _rank_value(rank: str) -> int:
     order = "23456789TJQKA"
     return order.index(rank) + 2
@@ -150,7 +155,7 @@ class LLMAgent:
     def __init__(
         self,
         *,
-        model: str = "gpt-4.1-mini",
+        model: str = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", DEFAULT_DEPLOYMENT_NAME),
         temperature: float = 0.0,
         max_retries: int = 3,
         timeout: float = 5.0,
@@ -176,19 +181,29 @@ class LLMAgent:
         if spec.loader is None:  # pragma: no cover - defensive
             return None
         spec.loader.exec_module(module)  # type: ignore[no-untyped-call]
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
+
+        client_cls = getattr(module, "AzureOpenAI", None)
+        if client_cls is None:
             return None
-        
+
+        api_key = os.environ.get("AZURE_OPENAI_API_KEY")
+        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+        api_version = os.environ.get("OPENAI_API_VERSION", DEFAULT_API_VERSION)
+        if not api_key or not endpoint:
+            return None
+
         # 检查代理设置
         http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
         https_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-        
+
         if http_proxy or https_proxy:
             print(f"🌐 检测到代理设置: HTTP={http_proxy}, HTTPS={https_proxy}")
-        
-        # 简单的客户端创建，让OpenAI库自动处理代理
-        return module.OpenAI(api_key=api_key)
+
+        return client_cls(
+            api_key=api_key,
+            azure_endpoint=endpoint,
+            api_version=api_version,
+        )
 
     def metrics(self) -> Dict[str, float]:
         return self._metrics.as_dict()
@@ -306,5 +321,9 @@ class LLMAgent:
         return True
 
 
-__all__ = ["LLMAgent"]
-
+__all__ = [
+    "LLMAgent",
+    "DEFAULT_API_VERSION",
+    "DEFAULT_DEPLOYMENT_NAME",
+    "DEFAULT_MODEL_ID",
+]

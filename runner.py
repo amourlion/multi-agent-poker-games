@@ -9,7 +9,9 @@ import random
 from collections import Counter
 from typing import Any, Dict, Optional
 
-from agent_llm import LLMAgent
+import os
+
+from agent_llm import DEFAULT_DEPLOYMENT_NAME, DEFAULT_MODEL_ID, LLMAgent
 from agent_random import RandomAgent
 from engine import FiveCardDrawEngine, GameResult
 from game_types import DecisionRules
@@ -113,7 +115,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--log-format", choices=["jsonl", "csv"], default="jsonl", help="Log format"
     )
-    parser.add_argument("--model", type=str, default="gpt-4.1-mini", help="LLM model name")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", DEFAULT_DEPLOYMENT_NAME),
+        help="Azure OpenAI deployment name",
+    )
     parser.add_argument(
         "--temperature", type=float, default=0.0, help="LLM sampling temperature"
     )
@@ -156,16 +163,10 @@ def main(argv: Optional[list[str]] = None) -> None:
         temperature=args.temperature,
         cache_path=args.cache_path,
     )
-    
-    # 检查API Key状态并输出提示
-    import os
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if api_key:
-        print(f"✅ OpenAI API Key 已设置，LLM代理将使用模型: {args.model}")
-        print(f"🤖 开始运行 随机代理 vs LLM智能代理 对战...")
-    else:
-        print("⚠️  未检测到 OpenAI API Key，LLM代理将使用保守策略回退")
-        print("🎲 开始运行 随机代理 vs 保守策略代理 对战...")
+
+    model_alias = os.environ.get("AZURE_OPENAI_MODEL", DEFAULT_MODEL_ID)
+    print(f"✅ Azure OpenAI 部署 `{args.model}` 已配置，模型映射 `{model_alias}`")
+    print("🤖 开始运行 随机代理 vs LLM智能代理 对战...")
     print(f"🎮 总共进行 {args.games} 局游戏\n")
     
     engine = FiveCardDrawEngine(agent_random, agent_llm, rng=rng)
@@ -207,4 +208,3 @@ def main(argv: Optional[list[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-
